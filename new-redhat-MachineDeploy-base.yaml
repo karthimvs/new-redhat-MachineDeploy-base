@@ -17,10 +17,10 @@
           enabled=1
           gpgcheck=0
           
-      dest: /etc/yum.repos/localserver.repo
+      dest: /etc/yum.repos.d/localserver.repo
       tags: repository
     
-    - name: Updating all packages - yum
+    - name: Updating all base packages - yum
       yum: 
         name: "*"
         state: latest
@@ -30,7 +30,7 @@
         name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
         state: present
 
-    - name: Installing additional base package for redhat 7
+    - name: Installing additional base package for redhat 7.9 (Maipo)
       yum: 
         name: "{{ item }}"
         state: latest
