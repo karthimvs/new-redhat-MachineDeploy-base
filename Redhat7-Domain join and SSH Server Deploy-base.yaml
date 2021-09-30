@@ -1,0 +1,253 @@
+# Script Version = 1.0
+# Purpose for = Joing the Windows domain and SSH security setup
+# Supported OS = rhel7,centos7
+# Developed by = Karthi Chandramoorthy
+
+- hosts: linux1
+  remote_user: root
+  become: yes
+  vars:
+    bindpassword: 'domain password'
+    domainusername: 'domain username'
+    sshport: "enter your ssh port"
+    sshuser1: user1
+    sshuser2: user2
+    newgroups: wheel,ssh_remote_allow
+    yumserver: 'enter your yum server ip'
+    ntpserver: 'enter your ntp server ip'
+    domainname: 'your-domain.com'
+    primaryhost: 'enter your primary AD'              #"domain-ipaddress ns1.your-domain.com ns1"
+    secondaryhost: 'enter your secondary AD'          #"domain-ipaddress ns2.your-domain.com ns2"
+  tasks:
+    - name: Adding Local yum Server Repository
+      copy:
+        content: |
+          [base]
+          Name="rhel7-main-rpms"
+          baseurl=http://'{{yumserver}}'/main/rhel-7-server-rpms
+          enabled=1
+          gpgcheck=0
+
+          [reposerver-rhel7-optional-rpms]
+          name= rhel7-optional-rpms
+          baseurl=http://'{{yumserver}}'/optional-rpms/rhel-7-server-optional-rpms
+          enabled=1
+          gpgcheck=0
+
+        dest: /etc/yum.repos.d/localserver.repo
+#        tags: repository
+
+    - name: Updating all base packages (inculding kernel) - yum
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Installing wget
+      yum:
+        name: wget
+        state: present
+
+    - name: Adding epel-reposistory from fedora project
+      shell: |
+        wget 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm'
+        rpm -ivh epel-release-latest-7.noarch.rpm
+        yum repolist
+      register: results
+
+    - name: epel-repo result
+      debug:
+        msg: "{{ results }}"
+
+    - name: Installing dependencies for Domain join
+      yum:
+        name:
+        - ntp
+        - sssd
+        - realmd
+        - oddjob
+        - oddjob-mkhomedir
+        - adcli
+        - samba-common
+        - krb5-workstation
+        - openldap-clients
+        - policycoreutils-python
+        - dbus
+        - python-pip
+        state: present
+      notify:
+        - restart realmd
+
+    - name: Updating NTP servers  configuration file
+      lineinfile:
+        path: /etc/ntp.conf
+        state: present
+        line: "{{ item }}"
+      with_items:
+      - '#NTP Server List'
+      - 'server {{ntpserver}}'
+
+    - name: Updating Hosts file - AD Entry
+      lineinfile:
+        path: /etc/hosts
+        state: present
+        line: "{{ item }}"
+      with_items:
+      - '{{ primaryhost }}'
+      - '{{ secondaryhost }}'
+
+    - name: Updating resolve.conf - AD search entry
+      lineinfile:
+        path: /etc/resolv.conf
+        state: present
+        line: 'search {{ domainname }}'
+
+    - name: Install pexpect using pip
+      pip:
+        name: pexpect  
+
+    - name: Join system to AD
+      expect:
+        command: /bin/bash -c "/usr/sbin/realm join --user="{{ domainusername }}" {{ domainname }}"
+        responses:
+          Password for *: "{{ bindpassword }}"
+      register: results
+
+    - name: Domain join results
+      debug:
+        msg: "{{ results }}"
+
+    - name: Disabling fully qulified name to sssd.conf
+      lineinfile:
+        dest: /etc/sssd/sssd.conf
+        regexp: '^use_fully_qualified_names ='
+        line: use_fully_qualified_names = False
+      notify:
+        - restart sssd
+
+    - name: Upding pam.d file to login using ssh as a user.
+      lineinfile:
+        path: /etc/pam.d/sshd
+        state: present
+        line: 'session required pam_oddjob_mkhomedir.so'
+
+    - name: restarting domain joining related services
+      service:
+        name: "{{ item }}"
+        state: restarted
+        enabled: yes
+      with_items:
+        - messagebus
+        - oddjobd
+
+    - name: giving write permission for sudoers file
+      file:
+        path: /etc/sudoers
+        mode: 0640
+    
+    - name: Updating %wheel group NOPASSWD mode.
+      lineinfile:
+        path: /etc/sudoers
+        regexp: '^%wheel'
+        line: '%wheel        ALL=(ALL)       NOPASSWD: ALL'
+
+    - name: Updating SSH Configuration file - Group, new-port, root, Other securitys.
+      replace: 
+        path: /etc/ssh/sshd_config
+        regexp: '{{ item.From }}'
+        replace: '{{ item.To }}'
+      with_items:
+        - { From: '#Port 22', To: 'Port {{ sshport }}'}
+        - { From: '#PermitRootLogin yes', To: 'PermitRootLogin no'}
+        - { From: '#PermitEmptyPasswords no', To: 'PermitEmptyPasswords no'}
+        - { From: '#ClientAliveInterval 0', To: 'ClientAliveInterval 30m'}
+        - { From: '#ClientAliveCountMax 3', To: 'ClientAliveCountMax 0'}
+      notify: restart sshd 
+
+    - name: Adding SSH group parameters in ssh configuration file.
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        state: present
+        line: "{{ item }}"
+      with_items:
+        - '#Allow specify users from active directory'
+        - 'AllowGroups     ssh_remote_allow'
+      notify: restart sshd
+
+    - name: Adding SSH port on selinux context
+      shell: |
+        semanage port -a -t ssh_port_t -p tcp '{{ sshport }}'
+        semanage port -l | grep ssh
+
+      register: results
+
+    - name: showing Selinux Port changing result
+      debug:
+        msg: "{{ results }}"
+
+    - name: Ensure firewalld is running
+      service:
+        name: firewalld
+        state: restarted
+
+    - name: allow new ssh port in firewalld
+      firewalld:
+        permanent: yes
+        port: '{{ item.port}}/{{ item.proto }}'
+        state: '{{ item.state }}'
+        zone: '{{ item.zone }}'
+      with_items:
+        - {port: "{{ sshport }}", proto: "tcp", state: "enabled", zone: "public" }  
+      
+      notify: restart firewalld
+
+    - name: Removing old ssh service port from firewalld
+      firewalld:
+        permanent: yes
+        service: ssh
+        state: disabled
+
+      notify: restart firewalld
+
+    - name: Adding group for SSH Remote users
+      group:
+        name: 'ssh_remote_allow'
+        state: present
+    
+    - name: Vaild users-1 add to wheel and ssh_remote_allow group
+      user:
+       name: "{{ sshuser1 }}"
+       groups: "{{ newgroups }}"
+       append: yes
+
+    - name: Vaild users-2 add to wheel and ssh_remote_allow group
+      user:
+       name: "{{ sshuser2 }}"
+       groups: "{{ newgroups }}"
+       append: yes
+
+    - name: Cleaning unwantted downloaded resource files.
+      file:
+        path: /root/epel-release-latest-7.noarch.rpm
+        state: absent
+
+            
+  handlers:
+      - name: restart realmd
+        service:
+          name: realmd
+          state: restarted
+
+      - name: restart sssd
+        service:
+          name: sssd
+          state: restarted
+
+      - name: restart sshd
+        service:
+          name: sshd
+          state: restarted
+
+      - name: restart firewalld
+        service:
+          name: firewalld
+          state: restarted
