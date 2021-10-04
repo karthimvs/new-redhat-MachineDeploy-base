@@ -67,7 +67,7 @@
         - oddjob
         - oddjob-mkhomedir
         - adcli
-        - samba-common
+        - samba-common-tools
         - krb5-workstation
         - openldap-clients
         - policycoreutils-python
@@ -76,6 +76,7 @@
         state: present
       notify:
         - restart realmd
+        - restart oddjob
 
     - name: Updating NTP servers  configuration file
       lineinfile:
@@ -235,6 +236,11 @@
       - name: restart realmd
         service:
           name: realmd
+          state: restarted
+      
+      - name: restart oddjob
+        service:
+          name: oddjobd
           state: restarted
 
       - name: restart sssd
